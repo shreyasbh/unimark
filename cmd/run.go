@@ -16,8 +16,8 @@ var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run benchmarks across all targets",
 	Example: `  unimark run --workload ./workloads/go-http
-  unimark run --workload ./workloads/go-http --targets docker,nanos
-  unimark run --workload ./workloads/go-http --runs 5 --output json`,
+  unimark run --targets docker,nanos --verbose
+  unimark run --runs 5 --output json`,
 	RunE: runBenchmark,
 }
 
@@ -32,6 +32,7 @@ func init() {
 	runCmd.Flags().DurationP("timeout", "T", 5*time.Minute, "timeout per run")
 	runCmd.Flags().IntP("connections", "c", 50, "concurrent connections for load generator")
 	runCmd.Flags().DurationP("duration", "d", 30*time.Second, "load generator duration")
+	runCmd.Flags().BoolP("verbose", "v", false, "show boot phase breakdown")
 }
 
 func runBenchmark(cmd *cobra.Command, args []string) error {
@@ -45,6 +46,7 @@ func runBenchmark(cmd *cobra.Command, args []string) error {
 	duration, _ := cmd.Flags().GetDuration("duration")
 	outputFormat, _ := cmd.Flags().GetString("output")
 	outputFile, _ := cmd.Flags().GetString("file")
+	verbose, _ := cmd.Flags().GetBool("verbose")
 
 	workload := target.Workload{
 		Name: "go-http",
@@ -61,6 +63,7 @@ func runBenchmark(cmd *cobra.Command, args []string) error {
 		Runs:       runs,
 		WarmupRuns: warmup,
 		RunTimeout: timeout,
+		Verbose:    verbose,
 		Load: bench.LoadConfig{
 			Duration:    duration,
 			Connections: connections,
@@ -91,7 +94,7 @@ func runBenchmark(cmd *cobra.Command, args []string) error {
 		results[i].Metadata.HostMemory = env.HostMemory
 	}
 
-	renderer, err := buildRenderer(outputFormat, outputFile)
+	renderer, err := buildRenderer(outputFormat, outputFile, verbose)
 	if err != nil {
 		return err
 	}
@@ -116,14 +119,14 @@ func buildTargets(names []string) ([]target.Target, error) {
 	return targets, nil
 }
 
-func buildRenderer(format string, file string) (report.Renderer, error) {
+func buildRenderer(format string, file string, verbose bool) (report.Renderer, error) {
 	switch format {
 	case "json":
 		return report.NewJSONRenderer(file), nil
 	case "markdown":
 		return report.NewMarkdownRenderer(file), nil
 	case "table", "":
-		return report.NewTableRenderer(), nil
+		return report.NewTableRenderer(verbose), nil
 	default:
 		return nil, fmt.Errorf("unknown output format: %s (valid: table, json, markdown)", format)
 	}

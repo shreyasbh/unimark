@@ -3,18 +3,12 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
 )
-
-type LoadResult struct {
-	Throughput float64
-	LatencyP50 float64
-	LatencyP95 float64
-	LatencyP99 float64
-}
 
 type Environment struct {
 	KernelVersion string
@@ -54,7 +48,6 @@ func kernelVersion(ctx context.Context) string {
 }
 
 func cpuModel() (string, error) {
-	// works on both Linux and Mac
 	cmd := exec.Command("uname", "-m")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -64,11 +57,9 @@ func cpuModel() (string, error) {
 }
 
 func totalMemory(ctx context.Context) (int64, error) {
-	// sysctl works on Mac and Linux
 	cmd := exec.CommandContext(ctx, "sysctl", "-n", "hw.memsize")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		// fallback for Linux
 		cmd = exec.CommandContext(ctx, "grep", "MemTotal", "/proc/meminfo")
 		output, err = cmd.CombinedOutput()
 		if err != nil {
@@ -90,4 +81,30 @@ func totalMemory(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	return bytes, nil
+}
+
+// ReadProcessMemory reads resident set size of a process in bytes
+// reads from /proc/<pid>/status — works for any process on the host
+func ReadProcessMemory(pid int) (int64, error) {
+	path := fmt.Sprintf("/proc/%d/status", pid)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read %s: %w", path, err)
+	}
+
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "VmRSS:") {
+			fields := strings.Fields(line)
+			if len(fields) != 3 {
+				return 0, fmt.Errorf("unexpected VmRSS format: %s", line)
+			}
+			kb, err := strconv.ParseInt(fields[1], 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("failed to parse VmRSS: %w", err)
+			}
+			return kb * 1024, nil
+		}
+	}
+
+	return 0, fmt.Errorf("VmRSS not found in %s", path)
 }

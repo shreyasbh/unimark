@@ -47,18 +47,18 @@ func bootTimes(runs []runResult) []time.Duration {
 	return out
 }
 
-func idleMemories(runs []runResult) []int64 {
+func avgMemories(runs []runResult) []int64 {
 	out := make([]int64, len(runs))
 	for i, r := range runs {
-		out[i] = r.memoryIdle
+		out[i] = r.memoryAvg
 	}
 	return out
 }
 
-func loadMemories(runs []runResult) []int64 {
+func peakMemories(runs []runResult) []int64 {
 	out := make([]int64, len(runs))
 	for i, r := range runs {
-		out[i] = r.memoryUnderLoad
+		out[i] = r.memoryPeak
 	}
 	return out
 }

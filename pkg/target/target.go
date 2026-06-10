@@ -13,6 +13,10 @@ type Target interface {
 	Endpoint() string
 }
 
+type PhaseReporter interface {
+	BootPhases() BootPhases
+}
+
 type Workload struct {
 	Name string
 	Port int
@@ -21,15 +25,16 @@ type Workload struct {
 }
 
 type Result struct {
-	Target          string
-	BootTime        time.Duration
-	MemoryIdle      int64
-	MemoryUnderLoad int64
-	Throughput      float64
-	LatencyP50      float64
-	LatencyP95      float64
-	LatencyP99      float64
-	Metadata        Metadata
+	Target      string
+	BootTime    time.Duration
+	BootPhases  *BootPhases
+	MemoryAvg   int64
+	MemoryPeak  int64
+	Throughput  float64
+	LatencyP50  float64
+	LatencyP95  float64
+	LatencyP99  float64
+	Metadata    Metadata
 }
 
 type Metadata struct {
