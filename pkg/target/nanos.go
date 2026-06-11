@@ -29,7 +29,6 @@ func (n *NanosTarget) BootPhases() BootPhases {
 	return n.phases
 }
 
-// timestampRegex matches lines like "[0.004140] en1: assigned"
 var timestampRegex = regexp.MustCompile(`\[(\d+\.\d+)\]`)
 
 func (n *NanosTarget) Start(ctx context.Context) (time.Duration, error) {
@@ -66,23 +65,28 @@ func (n *NanosTarget) Start(ctx context.Context) (time.Duration, error) {
 		}
 		defer f.Close()
 
+		scanner := bufio.NewScanner(f)
+
 		var firstLineTime time.Time
 		var networkUpSecs float64
+		var networkUpTime time.Time
 
-		scanner := bufio.NewScanner(f)
 		for {
 			for scanner.Scan() {
-				line := scanner.Text()
+				line := strings.TrimSpace(scanner.Text())
+				if line == "" {
+					continue
+				}
 
-				// capture time of first log line — QEMU is up
+				// set firstLineTime only once
 				if firstLineTime.IsZero() {
 					firstLineTime = time.Now()
 					n.phases.QEMUStartup = firstLineTime.Sub(start)
 				}
 
-				// capture network up timestamp from kernel log
-				// line looks like "[0.004140] en1: assigned 10.0.2.15"
+				// capture network up — record wall clock time immediately
 				if strings.Contains(line, "en1: assigned") && networkUpSecs == 0 {
+					networkUpTime = time.Now()
 					matches := timestampRegex.FindStringSubmatch(line)
 					if len(matches) > 1 {
 						networkUpSecs, _ = strconv.ParseFloat(matches[1], 64)
@@ -90,17 +94,23 @@ func (n *NanosTarget) Start(ctx context.Context) (time.Duration, error) {
 					}
 				}
 
-				// app ready
+				// app ready — record time immediately when line is seen
 				if strings.Contains(line, "listening on") {
-					appReady := time.Now()
-					n.phases.NetworkUp = time.Duration(networkUpSecs * float64(time.Second))
-					n.phases.AppReady = appReady.Sub(firstLineTime) - n.phases.KernelBoot
+					appReadyTime := time.Now()
+					if !networkUpTime.IsZero() {
+						n.phases.AppReady = appReadyTime.Sub(networkUpTime)
+					}
 					n.phases.Total = time.Since(start)
 					ready <- n.phases.Total
 					return
 				}
 			}
+
+			// wait for more data
 			time.Sleep(10 * time.Millisecond)
+
+			// reset scanner to read new lines
+			// firstLineTime and networkUpTime are preserved — not reset
 			scanner = bufio.NewScanner(f)
 		}
 	}()
@@ -149,6 +159,29 @@ func (n *NanosTarget) PID() (int, error) {
 	return n.process.Process.Pid, nil
 }
 
+func (n *NanosTarget) Memory(ctx context.Context) (int64, error) {
+	if n.process == nil {
+		return 0, fmt.Errorf("nanos process not running")
+	}
+
+	pid := n.process.Process.Pid
+
+	cmd := exec.CommandContext(ctx, "ps", "-o", "rss=", "-p",
+		fmt.Sprintf("%d", pid),
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("ps failed: %w", err)
+	}
+
+	kb, err := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse RSS: %w", err)
+	}
+
+	return kb * 1024, nil
+}
+
 func (n *NanosTarget) waitUntilReady(ctx context.Context) error {
 	for {
 		select {
@@ -175,30 +208,4 @@ func killPort(port int) {
 		exec.Command("kill", "-9", pid).Run()
 	}
 	time.Sleep(500 * time.Millisecond)
-}
-
-// Memory returns QEMU process memory from host perspective using ps
-// works on both Mac and Linux
-func (n *NanosTarget) Memory(ctx context.Context) (int64, error) {
-	if n.process == nil {
-		return 0, fmt.Errorf("nanos process not running")
-	}
-
-	pid := n.process.Process.Pid
-
-	cmd := exec.CommandContext(ctx, "ps", "-o", "rss=", "-p",
-		fmt.Sprintf("%d", pid),
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return 0, fmt.Errorf("ps failed: %w", err)
-	}
-
-	// ps returns RSS in kilobytes
-	kb, err := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse RSS: %w", err)
-	}
-
-	return kb * 1024, nil
 }

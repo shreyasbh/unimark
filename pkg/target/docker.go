@@ -1,6 +1,7 @@
 package target
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net/http"
@@ -30,7 +31,6 @@ func (d *DockerTarget) Setup(ctx context.Context, workload Workload) error {
 	d.workload = workload
 	d.endpoint = fmt.Sprintf("http://localhost:%d", workload.Port)
 
-	imageStart := time.Now()
 	cmd := exec.CommandContext(ctx, "docker", "build",
 		"-t", workload.Name,
 		workload.Path,
@@ -39,7 +39,6 @@ func (d *DockerTarget) Setup(ctx context.Context, workload Workload) error {
 	if err != nil {
 		return fmt.Errorf("docker build failed: %w\n%s", err, output)
 	}
-	d.phases.ImageLoad = time.Since(imageStart)
 	d.imageBuilt = true
 	return nil
 }
@@ -47,44 +46,38 @@ func (d *DockerTarget) Setup(ctx context.Context, workload Workload) error {
 func (d *DockerTarget) Start(ctx context.Context) (time.Duration, error) {
 	start := time.Now()
 
-	// start listening to docker events before running
-	// this captures create, network connect, start events with timestamps
-	eventsDone := make(chan struct{})
+	// start docker events listener before launching container
+	eventsCmd := exec.CommandContext(ctx, "docker", "events",
+		"--filter", fmt.Sprintf("event=create"),
+		"--filter", fmt.Sprintf("event=network"),
+		"--filter", fmt.Sprintf("event=start"),
+		"--format", "{{.Action}}",
+	)
+	eventsOut, err := eventsCmd.StdoutPipe()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get events pipe: %w", err)
+	}
+	eventsCmd.Start()
+
+	// track phase timestamps
 	var createTime, networkTime time.Time
+	eventsDone := make(chan struct{})
 
 	go func() {
 		defer close(eventsDone)
-		cmd := exec.CommandContext(ctx, "docker", "events",
-			"--filter", fmt.Sprintf("container=%s", d.workload.Name),
-			"--format", "{{.Time}} {{.Action}}",
-		)
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			return
-		}
-		cmd.Start()
-		defer cmd.Process.Kill()
-
-		buf := make([]byte, 256)
-		for {
-			n, err := stdout.Read(buf)
-			if err != nil {
-				return
-			}
-			line := strings.TrimSpace(string(buf[:n]))
-			if strings.Contains(line, "create") && createTime.IsZero() {
+		scanner := bufio.NewScanner(eventsOut)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			switch {
+			case line == "create" && createTime.IsZero():
 				createTime = time.Now()
-			}
-			if strings.Contains(line, "network") && networkTime.IsZero() {
+			case line == "connect" && networkTime.IsZero():
 				networkTime = time.Now()
 			}
 		}
 	}()
 
-	// small delay to let events listener start
-	time.Sleep(100 * time.Millisecond)
-	containerStart := time.Now()
-
+	// launch container
 	cmd := exec.CommandContext(ctx, "docker", "run",
 		"--detach",
 		"--publish", fmt.Sprintf("%d:%d", d.workload.Port, d.workload.Port),
@@ -93,19 +86,23 @@ func (d *DockerTarget) Start(ctx context.Context) (time.Duration, error) {
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		eventsCmd.Process.Kill()
 		return 0, fmt.Errorf("docker run failed: %w\n%s", err, output)
 	}
 	d.containerID = strings.TrimSpace(string(output))
 
+	// wait until app is ready
 	if err := d.waitUntilReady(ctx); err != nil {
+		eventsCmd.Process.Kill()
 		return 0, err
 	}
 
 	total := time.Since(start)
+	eventsCmd.Process.Kill()
 
 	// calculate phases
 	if !createTime.IsZero() {
-		d.phases.ContainerCreate = createTime.Sub(containerStart)
+		d.phases.ContainerCreate = createTime.Sub(start)
 	}
 	if !networkTime.IsZero() && !createTime.IsZero() {
 		d.phases.NetworkConnect = networkTime.Sub(createTime)
@@ -155,7 +152,6 @@ func (d *DockerTarget) waitUntilReady(ctx context.Context) error {
 	}
 }
 
-// Memory returns container memory usage in bytes using docker stats
 func (d *DockerTarget) Memory(ctx context.Context) (int64, error) {
 	if d.containerID == "" {
 		return 0, fmt.Errorf("container not running")
