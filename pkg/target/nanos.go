@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -31,8 +32,22 @@ func (n *NanosTarget) BootPhases() BootPhases {
 
 var timestampRegex = regexp.MustCompile(`\[(\d+\.\d+)\]`)
 
+func (n *NanosTarget) Setup(ctx context.Context, workload Workload) error {
+	n.workload = workload
+
+	if runtime.GOOS == "linux" {
+		n.endpoint = "http://10.0.0.2:8080"
+	} else {
+		n.endpoint = fmt.Sprintf("http://localhost:%d", workload.Port)
+	}
+
+	return nil
+}
+
 func (n *NanosTarget) Start(ctx context.Context) (time.Duration, error) {
-	killPort(n.workload.Port)
+	// kill any existing QEMU process holding the image lock
+	exec.Command("pkill", "-9", "-f", "qemu").Run()
+	time.Sleep(500 * time.Millisecond)
 
 	start := time.Now()
 
@@ -42,11 +57,23 @@ func (n *NanosTarget) Start(ctx context.Context) (time.Duration, error) {
 	}
 	n.logFile = logFile
 
-	cmd := exec.CommandContext(ctx, "ops", "run",
-		n.workload.Path+"/server",
-		"-p", fmt.Sprintf("%d", n.workload.Port),
-		"-c", n.workload.Path+"/config.json",
-	)
+	var cmd *exec.Cmd
+	if runtime.GOOS == "linux" {
+		cmd = exec.CommandContext(ctx, "ops", "run",
+			n.workload.Path+"/server",
+			"--tapname", "tap0",
+			"--ip-address", "10.0.0.2",
+			"--gateway", "10.0.0.1",
+			"-b",
+			"-c", n.workload.Path+"/config.json",
+		)
+	} else {
+		cmd = exec.CommandContext(ctx, "ops", "run",
+			n.workload.Path+"/server",
+			"-p", fmt.Sprintf("%d", n.workload.Port),
+			"-c", n.workload.Path+"/config.json",
+		)
+	}
 
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -68,8 +95,8 @@ func (n *NanosTarget) Start(ctx context.Context) (time.Duration, error) {
 		scanner := bufio.NewScanner(f)
 
 		var firstLineTime time.Time
-		var networkUpSecs float64
 		var networkUpTime time.Time
+		var networkUpSecs float64
 
 		for {
 			for scanner.Scan() {
@@ -78,13 +105,11 @@ func (n *NanosTarget) Start(ctx context.Context) (time.Duration, error) {
 					continue
 				}
 
-				// set firstLineTime only once
 				if firstLineTime.IsZero() {
 					firstLineTime = time.Now()
 					n.phases.QEMUStartup = firstLineTime.Sub(start)
 				}
 
-				// capture network up — record wall clock time immediately
 				if strings.Contains(line, "en1: assigned") && networkUpSecs == 0 {
 					networkUpTime = time.Now()
 					matches := timestampRegex.FindStringSubmatch(line)
@@ -94,7 +119,6 @@ func (n *NanosTarget) Start(ctx context.Context) (time.Duration, error) {
 					}
 				}
 
-				// app ready — record time immediately when line is seen
 				if strings.Contains(line, "listening on") {
 					appReadyTime := time.Now()
 					if !networkUpTime.IsZero() {
@@ -106,11 +130,7 @@ func (n *NanosTarget) Start(ctx context.Context) (time.Duration, error) {
 				}
 			}
 
-			// wait for more data
 			time.Sleep(10 * time.Millisecond)
-
-			// reset scanner to read new lines
-			// firstLineTime and networkUpTime are preserved — not reset
 			scanner = bufio.NewScanner(f)
 		}
 	}()
@@ -121,14 +141,11 @@ func (n *NanosTarget) Start(ctx context.Context) (time.Duration, error) {
 	case <-ctx.Done():
 		return 0, fmt.Errorf("timed out waiting for nanos: %w", ctx.Err())
 	case <-time.After(30 * time.Second):
+		if data, err := os.ReadFile(logFile.Name()); err == nil {
+			fmt.Printf("nanos log:\n%s\n", string(data))
+		}
 		return 0, fmt.Errorf("nanos did not start within 30 seconds")
 	}
-}
-
-func (n *NanosTarget) Setup(ctx context.Context, workload Workload) error {
-	n.workload = workload
-	n.endpoint = fmt.Sprintf("http://localhost:%d", workload.Port)
-	return nil
 }
 
 func (n *NanosTarget) Stop(ctx context.Context) error {
@@ -138,7 +155,8 @@ func (n *NanosTarget) Stop(ctx context.Context) error {
 		n.process = nil
 	}
 
-	killPort(n.workload.Port)
+	exec.Command("pkill", "-9", "-f", "qemu").Run()
+	time.Sleep(500 * time.Millisecond)
 
 	if n.logFile != nil {
 		os.Remove(n.logFile.Name())
@@ -166,6 +184,13 @@ func (n *NanosTarget) Memory(ctx context.Context) (int64, error) {
 
 	pid := n.process.Process.Pid
 
+	if runtime.GOOS == "linux" {
+		mem, err := readProcMemory(pid)
+		if err == nil {
+			return mem, nil
+		}
+	}
+
 	cmd := exec.CommandContext(ctx, "ps", "-o", "rss=", "-p",
 		fmt.Sprintf("%d", pid),
 	)
@@ -180,6 +205,30 @@ func (n *NanosTarget) Memory(ctx context.Context) (int64, error) {
 	}
 
 	return kb * 1024, nil
+}
+
+func readProcMemory(pid int) (int64, error) {
+	path := fmt.Sprintf("/proc/%d/status", pid)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "VmRSS:") {
+			fields := strings.Fields(line)
+			if len(fields) != 3 {
+				return 0, fmt.Errorf("unexpected VmRSS format")
+			}
+			kb, err := strconv.ParseInt(fields[1], 10, 64)
+			if err != nil {
+				return 0, err
+			}
+			return kb * 1024, nil
+		}
+	}
+
+	return 0, fmt.Errorf("VmRSS not found")
 }
 
 func (n *NanosTarget) waitUntilReady(ctx context.Context) error {
