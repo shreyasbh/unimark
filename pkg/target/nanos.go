@@ -15,6 +15,7 @@ import (
 )
 
 type NanosTarget struct {
+	SMP      int
 	workload Workload
 	process  *exec.Cmd
 	endpoint string
@@ -23,7 +24,14 @@ type NanosTarget struct {
 }
 
 func (n *NanosTarget) Name() string {
-	return "nanos"
+	return fmt.Sprintf("nanos-%dvCPU", n.smp())
+}
+
+func (n *NanosTarget) smp() int {
+	if n.SMP <= 0 {
+		return 1
+	}
+	return n.SMP
 }
 
 func (n *NanosTarget) BootPhases() BootPhases {
@@ -44,8 +52,12 @@ func (n *NanosTarget) Setup(ctx context.Context, workload Workload) error {
 	return nil
 }
 
+func fixLinuxRouting() {
+	exec.Command("ip", "route", "del", "10.0.0.0/24", "dev", "tap0").Run()
+	exec.Command("ip", "route", "add", "10.0.0.0/24", "dev", "br0").Run()
+}
+
 func (n *NanosTarget) Start(ctx context.Context) (time.Duration, error) {
-	// kill any existing QEMU process holding the image lock
 	exec.Command("pkill", "-9", "-f", "qemu").Run()
 	time.Sleep(500 * time.Millisecond)
 
@@ -65,6 +77,7 @@ func (n *NanosTarget) Start(ctx context.Context) (time.Duration, error) {
 			"--ip-address", "10.0.0.2",
 			"--gateway", "10.0.0.1",
 			"-b",
+			"--smp", strconv.Itoa(n.smp()),
 			"-c", n.workload.Path+"/config.json",
 		)
 	} else {
@@ -97,6 +110,7 @@ func (n *NanosTarget) Start(ctx context.Context) (time.Duration, error) {
 		var firstLineTime time.Time
 		var networkUpTime time.Time
 		var networkUpSecs float64
+		routeFixed := false
 
 		for {
 			for scanner.Scan() {
@@ -116,6 +130,10 @@ func (n *NanosTarget) Start(ctx context.Context) (time.Duration, error) {
 					if len(matches) > 1 {
 						networkUpSecs, _ = strconv.ParseFloat(matches[1], 64)
 						n.phases.KernelBoot = time.Duration(networkUpSecs * float64(time.Second))
+					}
+					if runtime.GOOS == "linux" && !routeFixed {
+						fixLinuxRouting()
+						routeFixed = true
 					}
 				}
 
