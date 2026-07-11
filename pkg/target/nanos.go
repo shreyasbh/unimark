@@ -15,12 +15,13 @@ import (
 )
 
 type NanosTarget struct {
-	SMP      int
-	workload Workload
-	process  *exec.Cmd
-	endpoint string
-	logFile  *os.File
-	phases   BootPhases
+	SMP          int
+	NanosVersion string
+	workload     Workload
+	process      *exec.Cmd
+	endpoint     string
+	logFile      *os.File
+	phases       BootPhases
 }
 
 func (n *NanosTarget) Name() string {
@@ -71,21 +72,31 @@ func (n *NanosTarget) Start(ctx context.Context) (time.Duration, error) {
 
 	var cmd *exec.Cmd
 	if runtime.GOOS == "linux" {
-		cmd = exec.CommandContext(ctx, "ops", "run",
-			n.workload.Path+"/server",
+		args := []string{
+			"run",
+			n.workload.Path + "/server",
 			"--tapname", "tap0",
 			"--ip-address", "10.0.0.2",
 			"--gateway", "10.0.0.1",
 			"-b",
 			"--smp", strconv.Itoa(n.smp()),
-			"-c", n.workload.Path+"/config.json",
-		)
+			"-c", n.workload.Path + "/config.json",
+		}
+		if n.NanosVersion != "" {
+			args = append(args, "--nanos-version", n.NanosVersion)
+		}
+		cmd = exec.CommandContext(ctx, "ops", args...)
 	} else {
-		cmd = exec.CommandContext(ctx, "ops", "run",
-			n.workload.Path+"/server",
+		args := []string{
+			"run",
+			n.workload.Path + "/server",
 			"-p", fmt.Sprintf("%d", n.workload.Port),
-			"-c", n.workload.Path+"/config.json",
-		)
+			"-c", n.workload.Path + "/config.json",
+		}
+		if n.NanosVersion != "" {
+			args = append(args, "--nanos-version", n.NanosVersion)
+		}
+		cmd = exec.CommandContext(ctx, "ops", args...)
 	}
 
 	cmd.Stdout = logFile

@@ -18,7 +18,8 @@ var runCmd = &cobra.Command{
 	Example: `  unimark run --workload ./workloads/go-http
   unimark run --targets docker,nanos --verbose
   unimark run --runs 5 --output json
-  unimark run --nanos-smp 8`,
+  unimark run --nanos-smp 8
+  unimark run --nanos-version 2e85d1e`,
 	RunE: runBenchmark,
 }
 
@@ -35,6 +36,7 @@ func init() {
 	runCmd.Flags().DurationP("duration", "d", 30*time.Second, "load generator duration")
 	runCmd.Flags().BoolP("verbose", "v", false, "show boot phase breakdown")
 	runCmd.Flags().Int("nanos-smp", 1, "number of vCPUs for Nanos (default 1, set to match Docker cores for fair CPU comparison)")
+	runCmd.Flags().String("nanos-version", "", "Nanos kernel version or commit hash to use (e.g. 2e85d1e)")
 }
 
 func runBenchmark(cmd *cobra.Command, args []string) error {
@@ -50,6 +52,7 @@ func runBenchmark(cmd *cobra.Command, args []string) error {
 	outputFile, _ := cmd.Flags().GetString("file")
 	verbose, _ := cmd.Flags().GetBool("verbose")
 	nanosSmp, _ := cmd.Flags().GetInt("nanos-smp")
+	nanosVersion, _ := cmd.Flags().GetString("nanos-version")
 
 	workload := target.Workload{
 		Name: "go-http",
@@ -57,7 +60,7 @@ func runBenchmark(cmd *cobra.Command, args []string) error {
 		Path: workloadPath,
 	}
 
-	targets, err := buildTargets(targetNames, nanosSmp)
+	targets, err := buildTargets(targetNames, nanosSmp, nanosVersion)
 	if err != nil {
 		return err
 	}
@@ -105,7 +108,7 @@ func runBenchmark(cmd *cobra.Command, args []string) error {
 	return renderer.Render(results)
 }
 
-func buildTargets(names []string, nanosSmp int) ([]target.Target, error) {
+func buildTargets(names []string, nanosSmp int, nanosVersion string) ([]target.Target, error) {
 	var targets []target.Target
 
 	for _, name := range names {
@@ -113,7 +116,10 @@ func buildTargets(names []string, nanosSmp int) ([]target.Target, error) {
 		case "docker":
 			targets = append(targets, &target.DockerTarget{})
 		case "nanos":
-			targets = append(targets, &target.NanosTarget{SMP: nanosSmp})
+			targets = append(targets, &target.NanosTarget{
+				SMP:          nanosSmp,
+				NanosVersion: nanosVersion,
+			})
 		default:
 			return nil, fmt.Errorf("unknown target: %s (valid: docker, nanos)", name)
 		}
